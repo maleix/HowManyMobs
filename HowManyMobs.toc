@@ -1,0 +1,8 @@
+## Interface: 11403
+## Title: How Many Mobs
+## Author: Your Name
+## Version: 1.0
+## Notes: Tracks how many mobs like the last one you killed you need to kill to level up
+## SavedVariables: HowManyMobsDB
+
+HowManyMobs.lua
