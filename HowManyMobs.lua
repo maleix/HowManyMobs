@@ -65,6 +65,37 @@ HowManyMobsDB = HowManyMobsDB or {
     minimapAngle = 45,
 }
 
+local DEFAULTS = {
+    lastMobs = {},
+    recentRealXPGains = {},
+    trackingEnabled = true,
+    uiX = nil,
+    uiY = nil,
+    uiScale = 1.0,
+    uiOpacity = 0.85,
+    uiLocked = false,
+    showLastKilled = true,
+    showMobLevel = true,
+    showAverageXP = false,
+    showEfficiency = true,
+    showEstimatedTime = false,
+    showSessionStats = true,
+    minimapAngle = 45,
+}
+
+local function CopyDefaults(src, dst)
+    for k, v in pairs(src) do
+        if type(v) == "table" then
+            if type(dst[k]) ~= "table" then
+                dst[k] = {}
+            end
+            CopyDefaults(v, dst[k])
+        elseif dst[k] == nil then
+            dst[k] = v
+        end
+    end
+end
+
 -- ============================================
 -- TARGET TRACKING
 -- ============================================
@@ -597,33 +628,24 @@ function HowManyMobs:AddMobToHistory(destName, destLevel)
 end
 
 function HowManyMobs:GetEstimatedTimeToLevel()
-    -- Use real session XP if available (most accurate)
-    if self.sessionMobKills and #self.sessionMobKills >= 2 and self.firstKillTime then
-        local oldest, newest = self.sessionMobKills[#self.sessionMobKills], self.sessionMobKills[1]
-        if oldest.time and newest.time and newest.time > oldest.time then
-            local timeElapsed = newest.time - oldest.time
-            if timeElapsed >= 5 then
-                local totalXP = 0
-                for _, kill in ipairs(self.sessionMobKills) do
-                    totalXP = totalXP + (kill.xpGained or 0)
-                end
-                if totalXP > 0 then
-                    local xpPerSecond = totalXP / timeElapsed
-                    if xpPerSecond > 0 then
-                        local xpNeeded = UnitXPMax("player") - UnitXP("player")
-                        if xpNeeded <= 0 then return 0 end
-                        local secondsNeeded = xpNeeded / xpPerSecond
-                        local minutes = math.floor(secondsNeeded / 60 + 0.5)
-                        if minutes < 60 then
-                            return minutes .. " min"
-                        else
-                            local hours = math.floor(minutes / 60)
-                            local mins = minutes % 60
-                            return hours .. "h " .. (mins > 0 and mins .. "m" or "")
-                        end
-                    end
-                end
-            end
+    local avgKillTime = self:GetAverageKillTime()
+    local avgXP = self:GetSessionAverageRealXP()
+    
+    if avgKillTime and avgXP and avgXP > 0 then
+        local xpNeeded = UnitXPMax("player") - UnitXP("player")
+        if xpNeeded <= 0 then return 0 end
+    
+        local mobsNeeded = xpNeeded / avgXP
+        local secondsNeeded = mobsNeeded * avgKillTime
+    
+        local minutes = math.floor(secondsNeeded / 60 + 0.5)
+    
+        if minutes < 60 then
+            return minutes .. " min"
+        else
+            local hours = math.floor(minutes / 60)
+            local mins = minutes % 60
+            return hours .. "h " .. (mins > 0 and mins .. "m" or "")
         end
     end
     
@@ -676,17 +698,20 @@ function HowManyMobs:UpdateAverageXPText()
         return
     end
 
-    -- Use session tracked XP first (most accurate), then rolling, then estimates
     local avg = self:GetSessionAverageRealXP()
+    local source = "session"
+
     if avg == 0 then
         avg = self:GetRollingAverageRealXP()
+        source = "rolling"
     end
     if avg == 0 then
         avg = self:GetAverageMobXP()
+        source = "estimate"
     end
 
     if avg > 0 then
-        self.averageXPText:SetText("|cffffd700Avg:|r |cff00ff00" .. avg .. " XP/kill|r")
+        self.averageXPText:SetText("|cffffd700Avg:|r |cff00ff00" .. avg .. " XP/kill|r |cff888888(" .. source .. ")")
     else
         self.averageXPText:SetText("|cffffd700Avg:|r |cff99ccffNo data yet|r")
     end
@@ -738,10 +763,16 @@ function HowManyMobs:UpdateMobCount()
     self:UpdateUILayout()
 
     local xpHour, killsHour = self:GetSessionStats()
+    -- Session stats
     if self.sessionStatsText then
-        self.sessionStatsText:SetText(
-            string.format("|cffffd700Session:|r |cff00ff00%.0f XP/hr|r |cff00ccff%.1f kills/hr|r", xpHour, killsHour)
-        )
+        if not self.firstKillTime or self.sessionKills == 0 then
+            self.sessionStatsText:SetText("|cffffd700Session:|r |cff99ccffNo data yet|r")
+        else
+            local xpHour, killsHour = self:GetSessionStats()
+            self.sessionStatsText:SetText(
+                string.format("|cffffd700Session:|r |cff00ff00%.0f XP/hr|r |cff00ccff%.1f kills/hr|r", xpHour, killsHour)
+            )
+        end
     end
 end
 
@@ -844,43 +875,52 @@ function HowManyMobs:OnXPUpdate()
     local currentXP = UnitXP("player")
     local gained = currentXP - (self.lastXP or currentXP)
 
-    if gained < 0 then
+    if gained <= 0 then
         self.lastXP = currentXP
         return
     end
 
-    if gained > 0 then
-        -- Only track XP if we have recent kills (filters out non-combat XP)
-        if self.sessionMobKills and #self.sessionMobKills > 0 then
-            -- Link XP to the most recent kill (within 10 seconds for group content delays)
-            local recentKill = self.sessionMobKills[1]
-            local timeSinceKill = GetTime() - recentKill.time
-            if timeSinceKill < 10 then
-                recentKill.xpGained = (recentKill.xpGained or 0) + gained
-                self.sessionXP = (self.sessionXP or 0) + gained
-                
-                -- Add to real XP gains tracking
-                table.insert(HowManyMobsDB.recentRealXPGains, 1, gained)
-                if #HowManyMobsDB.recentRealXPGains > 8 then
-                    table.remove(HowManyMobsDB.recentRealXPGains, 9)
+    -- Improved real XP linking: more forgiving window + better detection
+    local now = GetTime()
+    local matched = false
+
+    if self.sessionMobKills and #self.sessionMobKills > 0 then
+        for _, kill in ipairs(self.sessionMobKills) do
+            local dt = now - kill.time
+
+            if dt >= 0 and dt < 20 then
+                if not kill.xpAssigned then
+                    kill.xpGained = gained
+                    kill.xpAssigned = true
+                    matched = true
+                    break
                 end
             end
         end
     end
 
-    self.lastXP = currentXP
-
-    if HowManyMobsDB.lastMobs and #HowManyMobsDB.lastMobs > 0 then
-        self:UpdateMobCount()
+    -- Always record XP for rolling average even if no match
+    table.insert(HowManyMobsDB.recentRealXPGains, 1, gained)
+    if #HowManyMobsDB.recentRealXPGains > 12 then
+        table.remove(HowManyMobsDB.recentRealXPGains, 13)
     end
+
+    self.lastXP = currentXP
+    self:UpdateMobCount()   -- always update now
 end
 
 function HowManyMobs:OnPlayerLogin()
-    print("|cff00ff00" .. ADDON_NAME .. "|r v" .. VERSION .. " - Grinding Tracker loaded!")
+    -- Ensure DB exists
+    HowManyMobsDB = HowManyMobsDB or {}
+
+    -- Fill missing values safely
+    CopyDefaults(DEFAULTS, HowManyMobsDB)
+
+
+    print("|cff00ff00" .. ADDON_NAME .. "|r |cff888888v" .. VERSION .. "|r loaded! |cffffff00/hmm help|r")
     
     -- Reset session tracking for fresh session on login
     self.firstKillTime = nil
-    self.sessionXP = 0
     self.sessionKills = 0
     self.sessionMobKills = {}
 
@@ -1196,4 +1236,34 @@ function HowManyMobs:RegisterSettingsPanel()
     end
 end
 
-print("|cff00ff00HowManyMobs|r v" .. VERSION .. " - Grinding Tracker loaded! Use |cffffff00/hmm help|r")
+function HowManyMobs:GetAverageKillTime()
+    if not self.sessionMobKills or #self.sessionMobKills < 3 then
+        return nil
+    end
+
+    local times = {}
+
+    for i = 1, #self.sessionMobKills - 1 do
+        local t1 = self.sessionMobKills[i].time
+        local t2 = self.sessionMobKills[i + 1].time
+
+        if t1 and t2 and t1 > t2 then
+            local dt = t1 - t2
+
+            -- Ignore weird gaps (AFK, long breaks)
+            if dt > 0 and dt < 30 then
+                table.insert(times, dt)
+            end
+        end
+    end
+
+    if #times == 0 then return nil end
+
+    -- Compute average
+    local total = 0
+    for _, t in ipairs(times) do
+        total = total + t
+    end
+
+    return total / #times
+end
