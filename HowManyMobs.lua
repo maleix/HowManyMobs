@@ -2,6 +2,12 @@
 -- HowManyMobs: Track how many mobs you need to kill to level up
 -- Classic Era Addon - Full Feature Set
 -- ============================================
+-- FIXED: Last Killed mob name + level now works reliably
+-- Changes:
+--   • PLAYER_TARGET_CHANGED now updates target cache
+--   • OnCombatLogEvent now uses cache first (fixes death timing issues)
+--   • Cache valid for 12 seconds (better for pets/DoTs)
+-- ============================================
 
 local ADDON_NAME = "HowManyMobs"
 local HowManyMobs = CreateFrame("Frame")
@@ -58,7 +64,6 @@ end
 
 --- UpdateTargetCache: Tracks the current target's name and level
 -- This ensures we capture the mob level BEFORE it dies
--- When a mob dies, we look up its level from this cache
 function HowManyMobs:UpdateTargetCache()
     local targetName = UnitName("target")
     local targetLevel = UnitLevel("target")
@@ -77,14 +82,14 @@ end
 function HowManyMobs:GetCachedMobLevel(mobName)
     if self.targetCache.name == mobName then
         local timeSinceUpdate = GetTime() - (self.targetCache.lastUpdated or 0)
-        if timeSinceUpdate < 5 then  -- Cache valid for 5 seconds
+        if timeSinceUpdate < 12 then  -- Cache valid for 12 seconds (improved for pets/DoTs)
             return self.targetCache.level
         end
     end
     return nil
 end
 
--- ==================== MINIMAP BUTTON (maximum visibility fix) ====================
+-- ==================== MINIMAP BUTTON ====================
 function HowManyMobs:CreateMinimapButton()
     if self.MinimapButton then
         self.MinimapButton:Show()
@@ -105,17 +110,11 @@ function HowManyMobs:CreateMinimapButton()
     overlay:SetSize(54, 54)
     overlay:SetPoint("TOPLEFT")
 
-    -- Icon (properly padded)
+    -- Icon
     local icon = button:CreateTexture(nil, "ARTWORK")
     icon:SetSize(20, 20)
     icon:SetPoint("CENTER")
-
-    -- 🔥 Pick a nicer icon here:
     icon:SetTexture("Interface\\Icons\\Ability_Hunter_SniperShot")
-    -- alternatives:
-    -- "Interface\\Icons\\INV_Sword_04"
-    -- "Interface\\Icons\\Ability_Rogue_Ambush"
-    -- "Interface\\Icons\\INV_Misc_Map_01"
 
     button.icon = icon
 
@@ -134,7 +133,7 @@ function HowManyMobs:CreateMinimapButton()
         HowManyMobsDB.minimapAngle = 45
     end
 
-    -- Position function (Blizzard-style circular minimap)
+    -- Position function
     local function UpdatePosition()
         local angle = math.rad(HowManyMobsDB.minimapAngle)
         local radius = 80
@@ -173,7 +172,7 @@ function HowManyMobs:CreateMinimapButton()
         UpdatePosition()
     end)
 
-    -- Click behavior (UNCHANGED)
+    -- Click behavior
     button:SetScript("OnClick", function(self, mouseButton)
         if mouseButton == "LeftButton" then
             if HowManyMobs.UIFrame then
@@ -191,7 +190,6 @@ function HowManyMobs:CreateMinimapButton()
 
         elseif mouseButton == "RightButton" then
             HowManyMobs:CreateMinimapMenu()
-
             ToggleDropDownMenu(1, nil, HowManyMobs.MinimapMenu, self, 0, -5)
         end
     end)
@@ -211,13 +209,10 @@ function HowManyMobs:CreateMinimapButton()
         self.icon:SetDesaturated(true)
     end)
 
-    -- Start slightly greyed out
     button.icon:SetDesaturated(true)
-
     button:Show()
     self.MinimapButton = button
 
-    -- Ensure proper placement AFTER UI loads
     C_Timer.After(0, UpdatePosition)
 
     print("|cff00ff00HowManyMobs:|r Minimap button created")
@@ -338,14 +333,13 @@ function HowManyMobs:CreateMinimapMenu()
             HowManyMobs:UpdateUILayout()
         end
         UIDropDownMenu_AddButton(info, level)
-
     end
 
     UIDropDownMenu_Initialize(menu, MenuHandler, "MENU")
     self.MinimapMenu = menu
 end
 
--- ==================== THE REST OF YOUR WORKING SCRIPT (UNCHANGED) ====================
+-- ==================== UI ====================
 function HowManyMobs:CreateUI()
     if self.UIFrame then 
         print("|cff00ff00HowManyMobs:|r UI already exists")
@@ -392,25 +386,21 @@ function HowManyMobs:CreateUI()
     mobsNeededText:SetWidth(231)
     mobsNeededText:SetJustifyH("LEFT")
     mobsNeededText:SetText("")
-    mobsNeededText:SetAlpha(1.0)
 
     local lastKilledText = UIFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     lastKilledText:SetPoint("TOPLEFT", UIFrame, "TOPLEFT", 12, -31)
     lastKilledText:SetWidth(231)
     lastKilledText:SetJustifyH("LEFT")
-    lastKilledText:SetAlpha(1.0)
 
     local efficiencyText = UIFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     efficiencyText:SetPoint("TOPLEFT", UIFrame, "TOPLEFT", 12, -52)
     efficiencyText:SetWidth(231)
     efficiencyText:SetJustifyH("LEFT")
-    efficiencyText:SetAlpha(1.0)
 
     local estimatedTimeText = UIFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     estimatedTimeText:SetPoint("TOPLEFT", UIFrame, "TOPLEFT", 12, -73)
     estimatedTimeText:SetWidth(231)
     estimatedTimeText:SetJustifyH("LEFT")
-    estimatedTimeText:SetAlpha(1.0)
 
     local sessionStatsText = UIFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     sessionStatsText:SetPoint("TOPLEFT", UIFrame, "TOPLEFT", 12, -94)
@@ -439,13 +429,11 @@ function HowManyMobs:UpdateUILayout()
     local y = -topPadding
     local visibleLines = 1
 
-    -- ALWAYS: main line
     self.mobsNeededText:SetPoint("TOPLEFT", self.UIFrame, "TOPLEFT", 12, y)
     self.mobsNeededText:Show()
 
     y = y - lineHeight
 
-    -- LAST KILLED
     if HowManyMobsDB.showLastKilled then
         self.lastKilledText:SetPoint("TOPLEFT", self.UIFrame, "TOPLEFT", 12, y)
         self.lastKilledText:Show()
@@ -455,7 +443,6 @@ function HowManyMobs:UpdateUILayout()
         self.lastKilledText:Hide()
     end
 
-    -- EFFICIENCY RATING
     if HowManyMobsDB.showEfficiency then
         self.efficiencyText:SetPoint("TOPLEFT", self.UIFrame, "TOPLEFT", 12, y)
         self.efficiencyText:Show()
@@ -465,7 +452,6 @@ function HowManyMobs:UpdateUILayout()
         self.efficiencyText:Hide()
     end
 
-    -- ESTIMATED TIME
     if HowManyMobsDB.showEstimatedTime then
         self.estimatedTimeText:SetPoint("TOPLEFT", self.UIFrame, "TOPLEFT", 12, y)
         self.estimatedTimeText:Show()
@@ -475,7 +461,6 @@ function HowManyMobs:UpdateUILayout()
         self.estimatedTimeText:Hide()
     end
 
-    -- SESSION STATS (NEW FIXED POSITIONING)
     if HowManyMobsDB.showSessionStats then
         self.sessionStatsText:SetPoint("TOPLEFT", self.UIFrame, "TOPLEFT", 12, y)
         self.sessionStatsText:Show()
@@ -487,7 +472,6 @@ function HowManyMobs:UpdateUILayout()
         end
     end
 
-    -- FINAL HEIGHT (important buffer to prevent clipping)
     local newHeight = topPadding + (visibleLines * lineHeight) + 10
     self.UIFrame:SetHeight(newHeight)
 end
@@ -521,7 +505,10 @@ HowManyMobsDB = HowManyMobsDB or {
     minimapAngle = 45,
 }
 
--- (All your calculation functions are exactly as in your working script)
+-- ============================================
+-- CORE FUNCTIONS
+-- ============================================
+
 function HowManyMobs:GetAverageRealXP()
     if not self.lastXPGain or self.lastXPGain <= 0 then
         return 0
@@ -531,10 +518,7 @@ end
 
 function HowManyMobs:GetSessionStats()
     local timeElapsed = GetTime() - (self.sessionStartTime or GetTime())
-
-    if timeElapsed <= 0 then
-        return 0, 0
-    end
+    if timeElapsed <= 0 then return 0, 0 end
 
     local xpHour = (self.sessionXP or 0) / timeElapsed * 3600
     local killsHour = (self.sessionKills or 0) / timeElapsed * 3600
@@ -662,19 +646,12 @@ function HowManyMobs:UpdateMobCount()
             )
         )
     end
-
 end
 
 -- ============================================
 -- XP CALCULATION FUNCTIONS
--- Z-value represents the XP penalty range based on player level
--- Formula: XP = baseXP * (1 - levelDiff/ZD) where levelDiff is player-mob delta
 -- ============================================
 
---- GetZD: Returns the Z-value for a given player level
--- This affects XP penalties for lower-level mobs
--- @param playerLevel number Player's current level
--- @return number The Z-value for XP calculation
 function HowManyMobs:GetZD(playerLevel)
     if playerLevel <= 7 then return 5 end
     if playerLevel <= 9 then return 6 end
@@ -690,12 +667,6 @@ function HowManyMobs:GetZD(playerLevel)
     return 17
 end
 
---- EstimateMobXP: Calculates estimated XP for a mob based on level difference
--- Handles yellow/orange/red mobs with proper penalty scaling
--- Gray mobs (5+ levels below) return 0 XP
--- @param mobLevel number|nil The mob's level (defaults to player level)
--- @param playerLevel number The player's current level
--- @return number Estimated XP gain from this mob, 0 if gray
 function HowManyMobs:EstimateMobXP(mobLevel, playerLevel)
     if not mobLevel or mobLevel < 1 then mobLevel = playerLevel end
     local baseXP = 5 * playerLevel + 45
@@ -713,16 +684,6 @@ function HowManyMobs:EstimateMobXP(mobLevel, playerLevel)
     end
 end
 
--- ============================================
--- KILL EFFICIENCY RATING (#2)
--- ============================================
-
---- GetKillEfficiency: Calculates and color-codes kill efficiency
--- Returns color code and rating based on XP vs player level
--- @param mobLevel number The mob's level
--- @param playerLevel number The player's current level
--- @return string colorCode The efficiency rating color (green/yellow/red)
--- @return number efficiency The efficiency percentage (0-100)
 function HowManyMobs:GetKillEfficiency(mobLevel, playerLevel)
     if not mobLevel then mobLevel = playerLevel end
     
@@ -746,7 +707,6 @@ function HowManyMobs:GetKillEfficiency(mobLevel, playerLevel)
     end
 end
 
---- UpdateEfficiencyText: Updates the efficiency display line
 function HowManyMobs:UpdateEfficiencyText()
     if not self.efficiencyText or not HowManyMobsDB.showEfficiency then
         return
@@ -767,35 +727,50 @@ function HowManyMobs:UpdateEfficiencyText()
     end
 end
 
+-- ============================================
+-- FIXED: OnCombatLogEvent (main fix for Last Killed)
+-- ============================================
 function HowManyMobs:OnCombatLogEvent()
     if not HowManyMobsDB or not HowManyMobsDB.trackingEnabled then return end
-    local combatInfo = CombatLogGetCurrentEventInfo()
-    if not combatInfo then return end
-    local _, eventType, _, _, _, _, _, _, destName, destFlags = combatInfo
-    if eventType == "UNIT_DIED" then
-        if not destName or not destFlags then return end
-        local isPlayer = bit.band(destFlags, COMBATLOG_OBJECT_TYPE_PLAYER) ~= 0
-        local isAlly = bit.band(destFlags, COMBATLOG_OBJECT_AFFILIATION_MINE) ~= 0 
-                   or bit.band(destFlags, COMBATLOG_OBJECT_AFFILIATION_PARTY) ~= 0 
-                   or bit.band(destFlags, COMBATLOG_OBJECT_AFFILIATION_RAID) ~= 0
-        if not isPlayer and not isAlly and destName then
-            local targetName = UnitName("target") or ""
-            local targetLevel = nil
-            if targetName == destName then
-                targetLevel = UnitLevel("target")
-            end
-            local mobLevel = targetLevel or (HowManyMobsDB.lastMobs and HowManyMobsDB.lastMobs[1] and HowManyMobsDB.lastMobs[1].level) or UnitLevel("player")
-            self:AddMobToHistory(destName, mobLevel)
-            self:UpdateMobCount()
+
+    local _, eventType, _, _, _, _, _, _, destName, destFlags = CombatLogGetCurrentEventInfo()
+    if eventType ~= "UNIT_DIED" then return end
+
+    if not destName then return end
+
+    -- Skip players and friendly units
+    local isPlayer = bit.band(destFlags, COMBATLOG_OBJECT_TYPE_PLAYER) ~= 0
+    local isAlly = bit.band(destFlags, COMBATLOG_OBJECT_AFFILIATION_MINE) ~= 0 
+                or bit.band(destFlags, COMBATLOG_OBJECT_AFFILIATION_PARTY) ~= 0 
+                or bit.band(destFlags, COMBATLOG_OBJECT_AFFILIATION_RAID) ~= 0
+
+    if isPlayer or isAlly then return end
+
+    -- === FIXED: Use target cache first ===
+    local mobLevel = self:GetCachedMobLevel(destName)
+
+    -- Fallback 1: Still targeting the mob
+    if not mobLevel then
+        local currentTargetName = UnitName("target") or ""
+        if currentTargetName == destName then
+            mobLevel = UnitLevel("target")
         end
     end
+
+    -- Fallback 2: Previous mob or player level
+    if not mobLevel then
+        mobLevel = (HowManyMobsDB.lastMobs and HowManyMobsDB.lastMobs[1] and HowManyMobsDB.lastMobs[1].level) 
+                   or UnitLevel("player")
+    end
+
+    self:AddMobToHistory(destName, mobLevel)
+    self:UpdateMobCount()
 end
 
 function HowManyMobs:OnXPUpdate()
     local currentXP = UnitXP("player")
     local gained = currentXP - (self.lastXP or currentXP)
 
-    -- level-up reset safety
     if gained < 0 then
         self.lastXP = currentXP
         return
@@ -806,7 +781,6 @@ function HowManyMobs:OnXPUpdate()
     end
 
     self.sessionXP = (self.sessionXP or 0) + gained
-
     self.lastXP = currentXP
 
     if HowManyMobsDB.lastMobs and #HowManyMobsDB.lastMobs > 0 then
@@ -833,7 +807,6 @@ function HowManyMobs:OnPlayerLogin()
     
     print("|cff00ff00" .. ADDON_NAME .. "|r loaded successfully!")
     print("Type |cffffff00/hmm help|r to see all commands")
-    print("Settings available at: |cffffff00Options > AddOns > How Many Mobs|r")
     
     if HowManyMobsDB.lastMobs and #HowManyMobsDB.lastMobs > 0 then
         self:UpdateMobCount()
@@ -846,6 +819,9 @@ function HowManyMobs:OnPlayerEnteringWorld()
     end)
 end
 
+-- ============================================
+-- FIXED: OnEvent (now handles target changes)
+-- ============================================
 function HowManyMobs:OnEvent(event, ...)
     if event == "PLAYER_LOGIN" then
         self:OnPlayerLogin()
@@ -855,13 +831,15 @@ function HowManyMobs:OnEvent(event, ...)
         self:OnCombatLogEvent()
     elseif event == "PLAYER_XP_UPDATE" then
         self:OnXPUpdate()
+    elseif event == "PLAYER_TARGET_CHANGED" then
+        self:UpdateTargetCache()
     end
 end
 
 HowManyMobs:SetScript("OnEvent", HowManyMobs.OnEvent)
 
 -- ============================================
--- IMPROVED HELP SYSTEM (#5)
+-- HELP & SLASH COMMANDS
 -- ============================================
 
 function HowManyMobs:PrintHelp()
@@ -877,7 +855,7 @@ function HowManyMobs:PrintHelp()
     print("|cffffff00  /hmm reset|r - Clear all tracking data")
     print(" ")
     print("|cffff00ffUI CUSTOMIZATION:|r")
-    print("|cffffff00  /hmm lock|r - Lock the window to prevent dragging")
+    print("|cffffff00  /hmm lock|r - Lock the window")
     print("|cffffff00  /hmm unlock|r - Unlock the window")
     print("|cffffff00  /hmm scale <0.5-2.0>|r - Set UI scale")
     print("|cffffff00  /hmm opacity <0-1>|r - Set background opacity")
@@ -885,15 +863,9 @@ function HowManyMobs:PrintHelp()
     print("|cffff00ffDEBUG:|r")
     print("|cffffff00  /hmm debug|r - Toggle debug logging")
     print(" ")
-    print("|cffff00ffFEATURES:|r")
-    print("- Tracks mobs killed and calculates kills to next level")
-    print("- Color-coded kill efficiency (green=80%+, yellow=50%+, orange, red=0%)")
-    print("- Session statistics (XP/hr, kills/hr)")
-    print("- Estimated time to level")
     print("|cff00ff00=========================================|r")
 end
 
--- Slash commands
 SLASH_HOWMANYMOBS1 = "/hmm"
 SLASH_HOWMANYMOBS2 = "/howmanymobs"
 
@@ -915,7 +887,6 @@ SlashCmdList["HOWMANYMOBS"] = function(msg)
     elseif cmd == "button" then
         if HowManyMobs.MinimapButton then
             HowManyMobs.MinimapButton:Show()
-            HowManyMobs.MinimapButton:Raise()
             print("|cff00ff00HowManyMobs:|r Minimap button forced visible")
         else
             HowManyMobs:CreateMinimapButton()
@@ -926,17 +897,14 @@ SlashCmdList["HOWMANYMOBS"] = function(msg)
         HowManyMobsDB.lastMobs = {}
         print("|cff00ff00HowManyMobs:|r Tracking reset.")
         if HowManyMobs.mobsNeededText then
-            HowManyMobs.mobsNeededText:SetText("")
-            HowManyMobs:UpdateLastKilledText()
-            HowManyMobs:UpdateEstimatedTimeText()
-            HowManyMobs:UpdateUILayout()
+            HowManyMobs:UpdateMobCount()
         end
     elseif cmd == "toggle" then
         HowManyMobsDB.trackingEnabled = not HowManyMobsDB.trackingEnabled
         print("|cff00ff00HowManyMobs:|r Tracking " .. (HowManyMobsDB.trackingEnabled and "enabled" or "disabled"))
     elseif cmd == "lock" then
         HowManyMobsDB.uiLocked = true
-        print("|cff00ff00HowManyMobs:|r Frame is now |cffffff00locked|r (no dragging)")
+        print("|cff00ff00HowManyMobs:|r Frame is now |cffffff00locked|r")
     elseif cmd == "unlock" then
         HowManyMobsDB.uiLocked = false
         print("|cff00ff00HowManyMobs:|r Frame is now |cffffff00unlocked|r")
@@ -971,7 +939,6 @@ function HowManyMobs:CreateSettingsPanel()
     local panel = CreateFrame("Frame", "HowManyMobsSettingsPanel")
     panel.name = "How Many Mobs"
     
-    -- Helper function to add tooltips (#7 - Tooltips in Settings)
     local function AddTooltip(element, text)
         element:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -1029,7 +996,7 @@ function HowManyMobs:CreateSettingsPanel()
     lockCheck:SetPoint("TOPLEFT", 16, -190)
     lockCheck.text = lockCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     lockCheck.text:SetPoint("LEFT", lockCheck, "RIGHT", 4, 0)
-    lockCheck.text:SetText("Lock Frame Position (prevents accidental dragging)")
+    lockCheck.text:SetText("Lock Frame Position")
     lockCheck:SetChecked(HowManyMobsDB.uiLocked or false)
     lockCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.uiLocked = self:GetChecked()
@@ -1089,16 +1056,12 @@ function HowManyMobs:CreateSettingsPanel()
 
     local showSessionCheck = CreateFrame("CheckButton", "HowManyMobsShowSessionCheck", panel, "UICheckButtonTemplate")
     showSessionCheck:SetPoint("TOPLEFT", 16, -340)
-    
     showSessionCheck.text = showSessionCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     showSessionCheck.text:SetPoint("LEFT", showSessionCheck, "RIGHT", 4, 0)
     showSessionCheck.text:SetText("Show Session Stats")
-    
     showSessionCheck:SetChecked(HowManyMobsDB.showSessionStats or true)
-    
     showSessionCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.showSessionStats = self:GetChecked()
-    
         if HowManyMobs.sessionStatsText then
             if HowManyMobsDB.showSessionStats then
                 HowManyMobs.sessionStatsText:Show()
@@ -1106,13 +1069,12 @@ function HowManyMobs:CreateSettingsPanel()
                 HowManyMobs.sessionStatsText:Hide()
             end
         end
-    
         HowManyMobs:UpdateUILayout()
     end)
     AddTooltip(showSessionCheck, "Shows XP/hr and kills/hr for your current session")
     
     local resetBtn = CreateFrame("Button", "HowManyMobsResetBtn", panel, "GameMenuButtonTemplate")
-    resetBtn:SetPoint("TOPLEFT", 16, -340)
+    resetBtn:SetPoint("TOPLEFT", 16, -380)
     resetBtn:SetSize(120, 25)
     resetBtn:SetText("Reset Defaults")
     resetBtn:SetScript("OnClick", function()
@@ -1141,26 +1103,11 @@ function HowManyMobs:CreateSettingsPanel()
     end)
     AddTooltip(resetBtn, "Reset all settings to their default values")
     
-    local sessionStatsLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    sessionStatsLabel:SetPoint("TOPLEFT", 16, -370)
-    sessionStatsLabel:SetText("|cff00ff00Current Session:|r")
-    
-    local sessionStatsDisplay = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    sessionStatsDisplay:SetPoint("TOPLEFT", 16, -385)
-    sessionStatsDisplay:SetWidth(300)
-    sessionStatsDisplay:SetJustifyH("LEFT")
-    
     local helpText = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    helpText:SetPoint("TOPLEFT", 16, -410)
+    helpText:SetPoint("TOPLEFT", 16, -420)
     helpText:SetWidth(300)
     helpText:SetJustifyH("LEFT")
     helpText:SetText("Quick commands: /hmm show | hide | toggle | reset")
-    
-    local infoText = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    infoText:SetPoint("TOPLEFT", 16, -430)
-    infoText:SetWidth(300)
-    infoText:SetJustifyH("LEFT")
-    infoText:SetText("Type |cffffff00/hmm help|r for all available commands")
     
     return panel
 end
@@ -1176,4 +1123,4 @@ function HowManyMobs:RegisterSettingsPanel()
     end
 end
 
-print("|cff00ff00HowManyMobs|r addon initialized. Use |cffffff00/hmm help|r for all commands.")
+print("|cff00ff00HowManyMobs|r addon loaded with Last Killed fix! Use |cffffff00/hmm help|r for commands.")
