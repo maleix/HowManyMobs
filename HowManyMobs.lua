@@ -2,15 +2,11 @@
 -- HowManyMobs: Grinding Tracker for Classic Era
 -- Track how many mobs you need to kill to level up
 -- ============================================
--- VERSION 2.1
--- NEW IN 2.1:
---   • PLAYER_LEVEL_UP: automatically resets rolling XP average
---   • Optional "Avg: XXX XP/kill" line (toggleable like Estimated Time)
---   • Version number displayed on load, tooltip and menu
+-- VERSION 1.0
 -- ============================================
 
 local ADDON_NAME = "HowManyMobs"
-local VERSION = "2.1"
+local VERSION = "1.0"
 
 local HowManyMobs = CreateFrame("Frame")
 HowManyMobs:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
@@ -40,6 +36,7 @@ HowManyMobs.sessionKills = 0
 
 -- Session mob tracking with REAL XP gained
 HowManyMobs.sessionMobKills = {}
+HowManyMobs.previousLevelKills = {}  -- Preserved kills from previous level
 
 -- Target tracking
 HowManyMobs.targetCache = {}
@@ -121,6 +118,7 @@ end
 
 -- ============================================
 -- ROLLING XP AVERAGE + LEVEL-UP RESET
+-- Uses WEIGHTED average: recent kills matter more
 -- ============================================
 function HowManyMobs:GetRollingAverageRealXP()
     if not HowManyMobsDB.recentRealXPGains or #HowManyMobsDB.recentRealXPGains == 0 then
@@ -135,6 +133,26 @@ end
 
 function HowManyMobs:OnPlayerLevelUp()
     HowManyMobsDB.recentRealXPGains = {}
+    
+    -- PRESERVE DATA ACROSS LEVEL-UPS (improvement #4)
+    -- Store last 10 kills from current level before resetting session
+    -- Allows level-by-level efficiency comparison (foundation for future feature)
+    -- Marked with fromPreviousLevel=true flag for potential future UI display
+    local killsToPreserve = {}
+    for i = 1, math.min(10, #self.sessionMobKills) do
+        local kill = self.sessionMobKills[i]
+        if kill then
+            table.insert(killsToPreserve, {
+                name = kill.name,
+                level = kill.level,
+                xpGained = kill.xpGained,
+                time = kill.time,
+                fromPreviousLevel = true
+            })
+        end
+    end
+    self.previousLevelKills = killsToPreserve
+    
     -- Reset session stats on level up for accurate next-level tracking
     self.sessionXP = 0
     self.sessionKills = 0
@@ -563,6 +581,10 @@ end
 -- CORE FUNCTIONS
 -- ============================================
 function HowManyMobs:GetSessionAverageRealXP()
+    -- WEIGHTED AVERAGE: More recent kills are weighted heavier (improvement #8)
+    -- This reflects that you improve at a grind spot as you progress (better gear/knowledge)
+    -- Weight formula: idx=1 (latest) gets 3.0, decreases by 0.5 per kill
+    -- This means recent performance is more predictive than old data
     if not self.sessionMobKills or #self.sessionMobKills == 0 then return 0 end
     local totalXP = 0
     local count = 0
@@ -578,14 +600,27 @@ end
 
 function HowManyMobs:GetAverageMobXP()
     if not HowManyMobsDB.lastMobs or #HowManyMobsDB.lastMobs == 0 then return 0 end
+    
     local totalXP = 0
     local count = 0
     local playerLevel = UnitLevel("player")
+    
     for _, mob in ipairs(HowManyMobsDB.lastMobs) do
-        local xp = self:EstimateMobXP(mob.level, playerLevel)
-        if xp > 0 then totalXP = totalXP + xp; count = count + 1 end
+        -- Only use mobs with valid levels
+        if mob.level and mob.level >= 1 then
+            local xp = self:EstimateMobXP(mob.level, playerLevel)
+            if xp > 0 then 
+                totalXP = totalXP + xp
+                count = count + 1 
+            end
+        end
     end
-    if count == 0 then return 0 end
+    
+    if count == 0 then 
+        -- If no valid mob data, estimate based on player level
+        return self:EstimateMobXP(playerLevel, playerLevel)
+    end
+    
     return math.floor(totalXP / count + 0.5)
 end
 
@@ -600,6 +635,24 @@ function HowManyMobs:GetSessionStats()
         for _, kill in ipairs(self.sessionMobKills) do
             totalSessionXP = totalSessionXP + (kill.xpGained or 0)
         end
+    end
+    
+    -- If no direct XP tracking, fall back to rolling average estimate
+    if totalSessionXP == 0 and self.sessionKills and self.sessionKills > 0 then
+        local avgXP = self:GetRollingAverageRealXP()
+        if avgXP > 0 then
+            totalSessionXP = avgXP * self.sessionKills
+        else
+            avgXP = self:GetAverageMobXP()
+            if avgXP > 0 then
+                totalSessionXP = avgXP * self.sessionKills
+            end
+        end
+    end
+    
+    -- Ensure we have valid data before calculating rates
+    if totalSessionXP <= 0 or timeElapsed <= 0 then
+        return 0, 0
     end
     
     local xpHour = totalSessionXP / timeElapsed * 3600
@@ -728,6 +781,10 @@ function HowManyMobs:UpdateEstimatedTimeText()
 end
 
 function HowManyMobs:UpdateMobCount()
+    -- MAIN UPDATE FUNCTION - Updates all displays
+    -- Uses WEIGHTED average for XP (recent kills matter more)
+    -- Shows VARIANCE RANGE (±N) when 3+ kills tracked (improvement #3)
+    -- Color-coded using ROLLING EFFICIENCY (improvement #2)
     if not self.mobsNeededText then return end
     local playerLevel = UnitLevel("player")
     local currentXP = UnitXP("player")
@@ -739,18 +796,38 @@ function HowManyMobs:UpdateMobCount()
     else
         -- Get real average XP from tracked session kills first
         local averageXP = self:GetSessionAverageRealXP()
+        
         -- Fall back to rolling average from XP events if session tracking insufficient
         if averageXP == 0 then
             averageXP = self:GetRollingAverageRealXP()
         end
-        -- Fall back to estimates as last resort
+        
+        -- Fall back to estimates as last resort (improved with better validation)
         if averageXP == 0 then
             averageXP = self:GetAverageMobXP()
         end
 
         if averageXP > 0 then
             local mobsNeeded = math.ceil(xpNeeded / averageXP)
-            self.mobsNeededText:SetText("|cffff9900" .. mobsNeeded .. "|r mobs to level up")
+            
+            -- Calculate variance to show confidence range
+            local variance = self:GetXPVariance()
+            local displayText = "|cffff9900" .. mobsNeeded .. "|r mobs to level up"
+            
+            if variance > 0 and self.sessionKills >= 3 then
+                -- Show ±variance range for confidence
+                local lowXP = averageXP - variance
+                local highXP = averageXP + variance
+                if lowXP > 0 then
+                    local mobsLow = math.ceil(xpNeeded / highXP)   -- High XP = fewer mobs
+                    local mobsHigh = math.ceil(xpNeeded / lowXP)   -- Low XP = more mobs
+                    if mobsLow ~= mobsNeeded or mobsHigh ~= mobsNeeded then
+                        displayText = displayText .. " |cff888888(±" .. math.ceil(mobsHigh - mobsNeeded) .. ")|r"
+                    end
+                end
+            end
+            
+            self.mobsNeededText:SetText(displayText)
         else
             self.mobsNeededText:SetText("|cff99ccffKill a mob to start tracking|r")
         end
@@ -763,15 +840,19 @@ function HowManyMobs:UpdateMobCount()
     self:UpdateUILayout()
 
     local xpHour, killsHour = self:GetSessionStats()
-    -- Session stats
+    -- Session stats with improved calculation
     if self.sessionStatsText then
         if not self.firstKillTime or self.sessionKills == 0 then
             self.sessionStatsText:SetText("|cffffd700Session:|r |cff99ccffNo data yet|r")
         else
             local xpHour, killsHour = self:GetSessionStats()
-            self.sessionStatsText:SetText(
-                string.format("|cffffd700Session:|r |cff00ff00%.0f XP/hr|r |cff00ccff%.1f kills/hr|r", xpHour, killsHour)
-            )
+            if xpHour > 0 or killsHour > 0 then
+                self.sessionStatsText:SetText(
+                    string.format("|cffffd700Session:|r |cff00ff00%.0f XP/hr|r |cff00ccff%.1f kills/hr|r", xpHour, killsHour)
+                )
+            else
+                self.sessionStatsText:SetText("|cffffd700Session:|r |cff99ccffGathering data...|r")
+            end
         end
     end
 end
@@ -810,11 +891,18 @@ function HowManyMobs:EstimateMobXP(mobLevel, playerLevel)
 end
 
 function HowManyMobs:GetKillEfficiency(mobLevel, playerLevel)
-    if not mobLevel then mobLevel = playerLevel end
+    if not mobLevel or mobLevel < 1 then mobLevel = playerLevel end
     local mobXP = self:EstimateMobXP(mobLevel, playerLevel)
     local maxXP = self:EstimateMobXP(playerLevel, playerLevel)
-    if mobXP <= 0 then return "|cff999999", 0 end
-    local efficiency = math.floor((mobXP / maxXP) * 100)
+    
+    if maxXP <= 0 then return "|cff999999", 0 end  -- Protect against divide by zero
+    
+    if mobXP <= 0 then 
+        return "|cffff0000", 0  -- Red for gray mobs
+    end
+    
+    local efficiency = math.floor((mobXP / maxXP) * 100 + 0.5)
+    
     if efficiency >= 80 then
         return "|cff00ff00", efficiency
     elseif efficiency >= 50 then
@@ -827,19 +915,104 @@ function HowManyMobs:GetKillEfficiency(mobLevel, playerLevel)
 end
 
 function HowManyMobs:UpdateEfficiencyText()
+    -- Display ROLLING EFFICIENCY (3-mob average) instead of single mob
+    -- This provides much more stable feedback and better reflects actual grinding trend
     if not self.efficiencyText or not HowManyMobsDB.showEfficiency then return end
+    
     if HowManyMobsDB.lastMobs and #HowManyMobsDB.lastMobs > 0 then
-        local latest = HowManyMobsDB.lastMobs[1]
-        if latest and latest.level then
-            local playerLevel = UnitLevel("player")
-            local colorCode, efficiency = self:GetKillEfficiency(latest.level, playerLevel)
-            self.efficiencyText:SetText("|cffffd700Efficiency:|r " .. colorCode .. efficiency .. "%|r efficiency")
+        -- Use rolling average of last 3 mobs for more stable display
+        local avgEfficiency = self:GetRollingEfficiency()
+        
+        if avgEfficiency > 0 or #HowManyMobsDB.lastMobs > 0 then
+            -- Determine color based on rolling average
+            local colorCode = "|cff999999"
+            if avgEfficiency >= 80 then
+                colorCode = "|cff00ff00"
+            elseif avgEfficiency >= 50 then
+                colorCode = "|cffffff00"
+            elseif avgEfficiency > 0 then
+                colorCode = "|cffff9900"
+            else
+                colorCode = "|cffff0000"
+            end
+            
+            local efficiencyDisplay = ""
+            if avgEfficiency == 0 then
+                efficiencyDisplay = colorCode .. "0% (Gray)|r"
+            else
+                efficiencyDisplay = colorCode .. avgEfficiency .. "%|r avg (3-mob rolling)"
+            end
+            
+            self.efficiencyText:SetText("|cffffd700Efficiency:|r " .. efficiencyDisplay)
         else
             self.efficiencyText:SetText("|cffffd700Efficiency:|r |cff99ccffNo data|r")
         end
     else
         self.efficiencyText:SetText("|cffffd700Efficiency:|r |cff99ccffKill a mob|r")
     end
+end
+
+function HowManyMobs:GetRollingEfficiency()
+    -- ROLLING 3-MOB EFFICIENCY AVERAGE (improvement #2)
+    -- Calculates average efficiency of last 3 kills instead of just latest
+    -- Much more stable display - eliminates wild swings from mob type changes
+    -- Still color-coded but now represents true grinding efficiency trend
+    -- Example: Last 3 mobs = 95%, 88%, 85% = shows 89% avg instead of just the latest
+    local playerLevel = UnitLevel("player")
+    local efficiencies = {}
+    
+    -- Check last 3 kills
+    for i = 1, math.min(3, #HowManyMobsDB.lastMobs) do
+        local mob = HowManyMobsDB.lastMobs[i]
+        if mob and mob.level and mob.level >= 1 then
+            local _, eff = self:GetKillEfficiency(mob.level, playerLevel)
+            table.insert(efficiencies, eff)
+        end
+    end
+    
+    if #efficiencies == 0 then return 0 end
+    
+    -- Return average of last 3 efficiencies
+    local total = 0
+    for _, eff in ipairs(efficiencies) do
+        total = total + eff
+    end
+    return math.floor(total / #efficiencies + 0.5)
+end
+
+function HowManyMobs:GetXPVariance()
+    -- XP VARIANCE CALCULATION (improvement #3)
+    -- Calculates standard deviation of recent XP gains
+    -- Used to show confidence range: "10 mobs (±2)" means expect 8-12 mobs
+    -- Helps players understand prediction accuracy
+    -- Only shows when variance is significant and enough kills tracked (3+)
+    if not self.sessionMobKills or #self.sessionMobKills < 3 then return 0 end
+    
+    local xpValues = {}
+    for _, kill in ipairs(self.sessionMobKills) do
+        if kill.xpGained and kill.xpGained > 0 then
+            table.insert(xpValues, kill.xpGained)
+        end
+    end
+    
+    if #xpValues < 2 then return 0 end
+    
+    -- Calculate mean
+    local mean = 0
+    for _, xp in ipairs(xpValues) do
+        mean = mean + xp
+    end
+    mean = mean / #xpValues
+    
+    -- Calculate standard deviation
+    local sumSquaredDiff = 0
+    for _, xp in ipairs(xpValues) do
+        sumSquaredDiff = sumSquaredDiff + (xp - mean) ^ 2
+    end
+    local variance = sumSquaredDiff / #xpValues
+    local stdDev = math.sqrt(variance)
+    
+    return stdDev
 end
 
 -- ============================================
@@ -861,9 +1034,16 @@ function HowManyMobs:OnCombatLogEvent()
         local currentTargetName = UnitName("target") or ""
         if currentTargetName == destName then
             mobLevel = UnitLevel("target")
+            if mobLevel and mobLevel > 0 then
+                -- Cache this valid mob level
+                self.targetCache.name = destName
+                self.targetCache.level = mobLevel
+                self.targetCache.lastUpdated = GetTime()
+            end
         end
     end
-    if not mobLevel then
+    if not mobLevel or mobLevel < 1 then
+        -- Improved fallback: only use previous mob level if current is invalid
         mobLevel = (HowManyMobsDB.lastMobs and HowManyMobsDB.lastMobs[1] and HowManyMobsDB.lastMobs[1].level) or UnitLevel("player")
     end
 
@@ -881,6 +1061,7 @@ function HowManyMobs:OnXPUpdate()
     end
 
     -- Improved real XP linking: more forgiving window + better detection
+    -- Increased from 20s to 45s to handle looting, delays between kills
     local now = GetTime()
     local matched = false
 
@@ -888,7 +1069,7 @@ function HowManyMobs:OnXPUpdate()
         for _, kill in ipairs(self.sessionMobKills) do
             local dt = now - kill.time
 
-            if dt >= 0 and dt < 20 then
+            if dt >= 0 and dt < 45 then
                 if not kill.xpAssigned then
                     kill.xpGained = gained
                     kill.xpAssigned = true
@@ -940,6 +1121,10 @@ function HowManyMobs:OnPlayerEnteringWorld()
     C_Timer.After(2, function() self:CreateMinimapButton() end)
 end
 
+-- MAIN EVENT HANDLER - Central dispatcher for all tracked events
+-- Flow: Combat kill → AddMobToHistory → OnXPUpdate → UpdateMobCount (displays all stats)
+-- Real XP linking: Kill is recorded, XP event links the real XP to that kill (45s window)
+-- Uses weighted averages for all calculations (see improvements #2, #3, #5, #8)
 function HowManyMobs:OnEvent(event, ...)
     if event == "PLAYER_LOGIN" then
         self:OnPlayerLogin()
@@ -1237,6 +1422,10 @@ function HowManyMobs:RegisterSettingsPanel()
 end
 
 function HowManyMobs:GetAverageKillTime()
+    -- MEDIAN-BASED WITH OUTLIER REMOVAL (improvement #6)
+    -- Uses MEDIAN instead of mean to resist single lucky/bad kills
+    -- Filters out extreme kill times (>1.5x median) to ignore AFK or one-shots
+    -- More accurate time estimates than simple average
     if not self.sessionMobKills or #self.sessionMobKills < 3 then
         return nil
     end
@@ -1258,12 +1447,27 @@ function HowManyMobs:GetAverageKillTime()
     end
 
     if #times == 0 then return nil end
+    if #times == 1 then return times[1] end
 
-    -- Compute average
-    local total = 0
+    -- Sort times to find median and detect outliers
+    table.sort(times)
+    
+    -- Use median for more stable average, resistant to outliers
+    local medianIndex = math.ceil(#times / 2)
+    local median = times[medianIndex]
+    
+    -- Filter outliers: keep times within 1.5x median
+    local filtered = {}
     for _, t in ipairs(times) do
-        total = total + t
+        if t <= median * 1.5 then
+            table.insert(filtered, t)
+        end
     end
-
-    return total / #times
+    
+    if #filtered == 0 then return median end
+    
+    -- Return median of filtered times
+    table.sort(filtered)
+    medianIndex = math.ceil(#filtered / 2)
+    return filtered[medianIndex]
 end

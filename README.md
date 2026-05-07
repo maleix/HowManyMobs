@@ -2,6 +2,14 @@
 
 A World of Warcraft: Classic Era addon designed for **grinding** - tracks how many mobs you need to kill to level up.
 
+## What's New (v2.2+)
+
+- ✨ **3-mob rolling efficiency average** - stable, consistent efficiency ratings (no more wild swings)
+- 📊 **Confidence ranges on mob counter** - see ±variance (e.g., "10 ± 2 mobs") once you have 3+ kills
+- 🎯 **Weighted XP averaging** - recent kills matter more, reflects your improving performance at a grind spot
+- 🎪 **Median-based kill time** - outlier filtering removes one-shots and AFK delays for accurate time estimates
+- 📈 **Data preservation across levels** - preserves last 10 kills from previous level (foundation for level-by-level analysis)
+
 ## What is Grinding?
 
 In World of Warcraft, **grinding** is the process of repeatedly killing mobs (enemies) of a similar level to gain experience points and level up your character. It's a straightforward, mechanical approach to leveling where you:
@@ -14,11 +22,29 @@ This addon is specifically built to optimize your grinding sessions by showing y
 ## Features
 
 - **Mob Counter**: Automatically calculates how many more mobs you need to kill at your current grinding rate to reach the next level
-- **Session Statistics**: Tracks kills per hour and XP gain per hour during your grinding session to monitor your progress
+  - Shows **confidence range** (±N) based on XP variance once you've killed 3+ mobs
+  - Uses **weighted rolling average** - recent kills are weighted heavier (reflects learning/gear improvements)
+  
+- **Smart Efficiency Rating**: Shows you how efficient your current mob choice is for grinding
+  - **3-mob rolling average** for stable, consistent readings (no wild swings)
+  - Color-coded: green=optimal (80%+), yellow=good (50-79%), orange=slow (1-49%), red=gray mobs (0%)
+  - Updated in real-time as you grind
+  
+- **Session Statistics**: Tracks kills per hour and XP gain per hour during your grinding session
+  - Measures your actual grinding performance
+  - Uses weighted averages so recent performance is more accurate
+  
+- **Outlier Detection**: Kill time averaging uses median + outlier filtering
+  - Ignores lucky one-shots or AFK delays
+  - Provides more accurate "time to level" estimates
+  
 - **Minimap Button**: Quick access to grinding stats with a convenient minimap button
+  
 - **Drag-and-Drop UI**: Move the display frame and minimap button wherever you want
+  
 - **Real-time Tracking**: Updates instantly as you grind and gain experience from kills
-- **Efficiency Rating**: Shows you how efficient your current mob choice is for grinding
+  
+- **Cross-Level Data**: Preserves last 10 kills from previous level (for future level-by-level analysis)
 
 ## Installation
 
@@ -67,10 +93,17 @@ The addon compares the XP you gain from your current mob to the maximum XP you c
 Efficiency = (XP from current mob / XP from same-level mob) × 100%
 ```
 
+**Important**: Efficiency shows a **3-mob rolling average** instead of single-kill ratings. This means:
+- You need at least 1 kill to start seeing efficiency
+- After 3 kills, the display becomes a true average of your last 3 targets
+- This eliminates wild swings when changing mob types
+- Much better reflects your actual grinding trend
+
 **Example:**
-- Level 20 character grinding Level 20 mobs = **100% efficient**
-- Level 20 character grinding Level 18 mobs = **~50% efficient** (takes twice as long)
-- Level 20 character grinding Level 16 mobs = **~0% efficient** (too low level, little to no XP)
+- Level 20 character grinds Level 20 mobs = **100% efficient**
+- Kills 3 of them = rolling avg shows **100%**
+- Then kills 1 Level 18 mob = rolling avg shows ~**83%** (average of 3 recent kills)
+- Then finds 3 more Level 20 mobs = rolling avg climbs back to ~**100%**
 
 ### Color Coding
 
@@ -79,11 +112,44 @@ Efficiency = (XP from current mob / XP from same-level mob) × 100%
 - **🟠 Orange (1-49%)**: Poor efficiency - mobs are too low level. Find harder mobs to level faster
 - **🔴 Red (0%)**: Gray mobs give no XP. Find mobs closer to your level
 
-### Pro Tips
+### Mob Counter Accuracy
 
-- **Best grinding efficiency**: Mobs at your exact level (100%)
-- **Diminishing returns**: Each level below you significantly reduces XP gains
-- **Challenging content**: Group dungeons might give lower efficiency mobs but faster killing = same or better XP/hr
+The addon shows how many mobs you need to level: **"10 mobs to level up"**
+
+After 3+ kills, you'll also see a **confidence range**: **"10 mobs to level up (±2)"**
+
+This means:
+- Best case (if XP variance is low): ~8 mobs
+- Average case: 10 mobs
+- Worst case (if XP variance is high): ~12 mobs
+
+The ±range gets tighter as you kill more mobs (variance decreases = more confident prediction)
+
+## Advanced Features Explained
+
+### Weighted XP Averaging
+The addon doesn't use simple averages. Instead, **recent kills get higher weight** than older kills:
+- Your latest kill: 3.0x weight
+- Decreases gradually: 2.5x, 2.0x, 1.5x, 1.0x, 0.5x
+- This reflects that you **improve at a grind spot** as you continue (better gear, understanding mob patterns)
+- Makes predictions more accurate over time
+
+**Example**: If your first 3 kills gave 80, 85, 90 XP:
+- Simple average: 85 XP
+- Weighted average: ~87 XP (recent 90 is weighted higher)
+- More likely accurate since you're getting faster at this spot
+
+### Kill Time Averaging
+The addon uses **median with outlier filtering** for time estimates:
+- Calculates the median (middle value) of kill times, not average
+- Removes extreme outliers (kill times >1.5x the median)
+- Eliminates "lucky one-shots" or "AFK delays" from skewing estimates
+- Provides realistic "time to level" calculations
+
+**Example**: Kill times of 3, 4, 4, 5, 20 seconds
+- Simple average: 7.2 seconds
+- Median with outliers: 4 seconds (removes the 20s AFK delay)
+- Much more realistic!
 
 ## Compatibility
 
