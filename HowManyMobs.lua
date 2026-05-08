@@ -17,6 +17,27 @@ HowManyMobs:RegisterEvent("PLAYER_TARGET_CHANGED")
 HowManyMobs:RegisterEvent("PLAYER_LEVEL_UP")
 
 -- ============================================
+-- ARCHITECTURE OVERVIEW
+-- State is split into two areas:
+--   HowManyMobs.*   — session data (in-memory only, reset on login/level-up)
+--   HowManyMobsDB.* — SavedVariables (persists across sessions and /reload)
+--
+-- Kill tracking data flow:
+--   COMBAT_LOG_EVENT_UNFILTERED
+--     → OnCombatLogEvent:
+--         damage events  → populate damagedMobs{GUID} (phase 1: prove we hit it)
+--         UNIT_DIED      → AddMobToHistory() then UpdateMobCount() (phase 2: credit kill)
+--   PLAYER_XP_UPDATE
+--     → OnXPUpdate: link XP gain to the most recent unmatched kill in sessionMobKills
+--                   then call UpdateMobCount()
+--
+-- XP average priority (highest to lowest):
+--   1. GetSessionAverageRealXP  — weighted avg of matched real XP this session (up to 10 kills)
+--   2. GetRollingAverageRealXP  — simple avg of persisted real XP (up to 12, survives reload)
+--   3. GetAverageMobXP          — formula estimate from mob levels (pure fallback, no real data)
+-- ============================================
+
+-- ============================================
 -- UI FRAME REFERENCES
 -- ============================================
 HowManyMobs.UIFrame = nil
@@ -29,16 +50,24 @@ HowManyMobs.sessionStatsText = nil
 HowManyMobs.MinimapButton = nil
 
 HowManyMobs.lastXP = UnitXP("player")
-HowManyMobs.sessionStartTime = nil
 HowManyMobs.firstKillTime = nil
-HowManyMobs.sessionXP = 0
 HowManyMobs.sessionKills = 0
+HowManyMobs.sessionTotalXP = 0  -- Running total of all matched kill XP this session
 
--- Session mob tracking with REAL XP gained
+-- Session mob tracking with REAL XP gained.
+-- Each entry is a table with the following fields:
+--   name        (string)  mob name
+--   level       (number)  mob level at time of kill
+--   time        (number)  GetTime() timestamp of the kill
+--   xpGained    (number)  raw XP gain linked to this kill (0 until linked via OnXPUpdate)
+--   xpAssigned  (bool)    true once a PLAYER_XP_UPDATE event has been matched to this kill
+--   rested      (bool)    true if the linked XP included a rested bonus (doubled XP)
+--   baseXP      (number)  non-rested XP amount (≈ xpGained/2 when rested);
+--                          used for predictions so estimates stay accurate after rested expires
+-- Index 1 = newest kill (prepended via table.insert at position 1). Capped at 10 entries.
 HowManyMobs.sessionMobKills = {}
-HowManyMobs.previousLevelKills = {}  -- Preserved kills from previous level
 
--- Target tracking
+-- Target tracking (multi-entry: stores level for multiple mob names)
 HowManyMobs.targetCache = {}
 
 -- ============================================
@@ -99,18 +128,32 @@ end
 function HowManyMobs:UpdateTargetCache()
     local targetName = UnitName("target")
     local targetLevel = UnitLevel("target")
-    if targetName and targetLevel then
-        self.targetCache.name = targetName
-        self.targetCache.level = targetLevel
-        self.targetCache.lastUpdated = GetTime()
+    if targetName and targetLevel and targetLevel > 0 then
+        local now = GetTime()
+        self.targetCache[targetName] = {
+            level = targetLevel,
+            lastUpdated = now
+        }
+        -- Prune old entries at most once every 60 seconds
+        if not self.lastTargetCachePrune or now - self.lastTargetCachePrune > 60 then
+            self.lastTargetCachePrune = now
+            for name, data in pairs(self.targetCache) do
+                if now - data.lastUpdated > 120 then
+                    self.targetCache[name] = nil
+                end
+            end
+        end
     end
 end
 
 function HowManyMobs:GetCachedMobLevel(mobName)
-    if self.targetCache.name == mobName then
-        local timeSinceUpdate = GetTime() - (self.targetCache.lastUpdated or 0)
-        if timeSinceUpdate < 12 then
-            return self.targetCache.level
+    local entry = self.targetCache[mobName]
+    if entry then
+        local timeSinceUpdate = GetTime() - (entry.lastUpdated or 0)
+        if timeSinceUpdate < 120 then
+            return entry.level
+        else
+            self.targetCache[mobName] = nil
         end
     end
     return nil
@@ -133,29 +176,13 @@ end
 
 function HowManyMobs:OnPlayerLevelUp()
     HowManyMobsDB.recentRealXPGains = {}
-    
-    -- PRESERVE DATA ACROSS LEVEL-UPS (improvement #4)
-    -- Store last 10 kills from current level before resetting session
-    -- Allows level-by-level efficiency comparison (foundation for future feature)
-    -- Marked with fromPreviousLevel=true flag for potential future UI display
-    local killsToPreserve = {}
-    for i = 1, math.min(10, #self.sessionMobKills) do
-        local kill = self.sessionMobKills[i]
-        if kill then
-            table.insert(killsToPreserve, {
-                name = kill.name,
-                level = kill.level,
-                xpGained = kill.xpGained,
-                time = kill.time,
-                fromPreviousLevel = true
-            })
-        end
-    end
-    self.previousLevelKills = killsToPreserve
+
+    -- Sync lastXP so the next PLAYER_XP_UPDATE doesn't see a negative/bogus gain
+    self.lastXP = UnitXP("player")
     
     -- Reset session stats on level up for accurate next-level tracking
-    self.sessionXP = 0
     self.sessionKills = 0
+    self.sessionTotalXP = 0
     self.sessionMobKills = {}
     self.firstKillTime = nil
     if self.mobsNeededText then
@@ -251,6 +278,7 @@ function HowManyMobs:CreateMinimapButton()
         GameTooltip:AddLine("|cff00ff00HowManyMobs|r v" .. VERSION)
         GameTooltip:AddLine("Grinding tracker - shows mobs to level", 1, 1, 1)
         GameTooltip:AddLine("Left-click to toggle window", 1, 1, 1)
+        GameTooltip:AddLine("Right-click for options", 1, 1, 1)
         GameTooltip:Show()
         self.icon:SetDesaturated(false)
     end)
@@ -388,6 +416,11 @@ function HowManyMobs:CreateMinimapMenu()
         info.func = function()
             HowManyMobsDB.lastMobs = {}
             HowManyMobsDB.recentRealXPGains = {}
+            HowManyMobs.sessionMobKills = {}
+            HowManyMobs.sessionKills = 0
+            HowManyMobs.sessionTotalXP = 0
+            HowManyMobs.firstKillTime = nil
+            HowManyMobs.damagedMobs = {}
             HowManyMobs:UpdateMobCount()
         end
         info.notCheckable = true
@@ -581,21 +614,36 @@ end
 -- CORE FUNCTIONS
 -- ============================================
 function HowManyMobs:GetSessionAverageRealXP()
-    -- WEIGHTED AVERAGE: More recent kills are weighted heavier (improvement #8)
-    -- This reflects that you improve at a grind spot as you progress (better gear/knowledge)
-    -- Weight formula: idx=1 (latest) gets 3.0, decreases by 0.5 per kill
-    -- This means recent performance is more predictive than old data
+    -- Weighted average: recent kills count more than older ones.
+    -- Weight formula: newest kill = N, second newest = N-1, ..., oldest = 1
+    -- (N = number of kills that have real XP data, up to 10).
+    -- Two-pass approach: pass 1 counts valid kills to determine N (the weight scale),
+    -- pass 2 computes the weighted sum using baseXP (non-rested) for accurate predictions.
     if not self.sessionMobKills or #self.sessionMobKills == 0 then return 0 end
-    local totalXP = 0
+    local totalWeightedXP = 0
+    local totalWeight = 0
     local count = 0
+    -- Pass 1: count kills with real XP data to establish the weight scale
     for _, kill in ipairs(self.sessionMobKills) do
         if kill.xpGained and kill.xpGained > 0 then
-            totalXP = totalXP + kill.xpGained
             count = count + 1
         end
     end
     if count == 0 then return 0 end
-    return math.floor(totalXP / count + 0.5)
+    local idx = 0
+    -- Pass 2: compute weighted sum (newest kill gets weight=count, oldest gets weight=1)
+    for _, kill in ipairs(self.sessionMobKills) do
+        if kill.xpGained and kill.xpGained > 0 then
+            idx = idx + 1
+            local weight = count - idx + 1  -- newest = count, oldest = 1
+            -- Use non-rested base XP for predictions (more accurate when rested runs out)
+            local xp = kill.baseXP or kill.xpGained
+            totalWeightedXP = totalWeightedXP + xp * weight
+            totalWeight = totalWeight + weight
+        end
+    end
+    if totalWeight == 0 then return 0 end
+    return math.floor(totalWeightedXP / totalWeight + 0.5)
 end
 
 function HowManyMobs:GetAverageMobXP()
@@ -627,17 +675,13 @@ end
 function HowManyMobs:GetSessionStats()
     if not self.firstKillTime then return 0, 0 end
     local timeElapsed = GetTime() - self.firstKillTime
-    if timeElapsed <= 0 then return 0, 0 end
+    -- Require at least 30s of data to avoid wild initial spikes
+    if timeElapsed < 30 then return 0, 0 end
     
-    -- Calculate XP only from kills that had XP linked to them
-    local totalSessionXP = 0
-    if self.sessionMobKills and #self.sessionMobKills > 0 then
-        for _, kill in ipairs(self.sessionMobKills) do
-            totalSessionXP = totalSessionXP + (kill.xpGained or 0)
-        end
-    end
+    -- Use running total (not capped by sessionMobKills size)
+    local totalSessionXP = self.sessionTotalXP or 0
     
-    -- If no direct XP tracking, fall back to rolling average estimate
+    -- Fall back to estimate if no real XP tracked yet
     if totalSessionXP == 0 and self.sessionKills and self.sessionKills > 0 then
         local avgXP = self:GetRollingAverageRealXP()
         if avgXP > 0 then
@@ -650,8 +694,7 @@ function HowManyMobs:GetSessionStats()
         end
     end
     
-    -- Ensure we have valid data before calculating rates
-    if totalSessionXP <= 0 or timeElapsed <= 0 then
+    if totalSessionXP <= 0 then
         return 0, 0
     end
     
@@ -686,7 +729,7 @@ function HowManyMobs:GetEstimatedTimeToLevel()
     
     if avgKillTime and avgXP and avgXP > 0 then
         local xpNeeded = UnitXPMax("player") - UnitXP("player")
-        if xpNeeded <= 0 then return 0 end
+        if xpNeeded <= 0 then return nil end
     
         local mobsNeeded = xpNeeded / avgXP
         local secondsNeeded = mobsNeeded * avgKillTime
@@ -710,15 +753,21 @@ function HowManyMobs:GetEstimatedTimeToLevel()
     local timeElapsed = newest.time - oldest.time
     if timeElapsed < 5 then return nil end
     local totalXP = 0
-    local playerLevel = UnitLevel("player")
-    for _, mob in ipairs(mobs) do
-        totalXP = totalXP + self:EstimateMobXP(mob.level, playerLevel)
+    -- Prefer persisted real XP average over formula estimates
+    local rollingAvg = self:GetRollingAverageRealXP()
+    if rollingAvg > 0 then
+        totalXP = rollingAvg * #mobs
+    else
+        local playerLevel = UnitLevel("player")
+        for _, mob in ipairs(mobs) do
+            totalXP = totalXP + self:EstimateMobXP(mob.level, playerLevel)
+        end
     end
     if totalXP <= 0 then return nil end
     local xpPerSecond = totalXP / timeElapsed
     if xpPerSecond <= 0 then return nil end
     local xpNeeded = UnitXPMax("player") - UnitXP("player")
-    if xpNeeded <= 0 then return 0 end
+    if xpNeeded <= 0 then return nil end
     local secondsNeeded = xpNeeded / xpPerSecond
     local minutes = math.floor(secondsNeeded / 60 + 0.5)
     if minutes < 60 then
@@ -738,7 +787,17 @@ function HowManyMobs:UpdateLastKilledText()
     if HowManyMobsDB.lastMobs and #HowManyMobsDB.lastMobs > 0 then
         local latest = HowManyMobsDB.lastMobs[1]
         local levelPart = HowManyMobsDB.showMobLevel and latest.level and " (Lvl " .. latest.level .. ")" or ""
-        self.lastKilledText:SetText("|cffffd700Last killed:|r |cff1eff00" .. latest.name .. levelPart .. "|r")
+        -- Show real XP gained if available from session tracking
+        local xpPart = ""
+        if self.sessionMobKills then
+            for _, kill in ipairs(self.sessionMobKills) do
+                if kill.name == latest.name and kill.xpGained and kill.xpGained > 0 then
+                    xpPart = " |cff00ccff" .. kill.xpGained .. " XP|r"
+                    break
+                end
+            end
+        end
+        self.lastKilledText:SetText("|cffffd700Last killed:|r |cff1eff00" .. latest.name .. levelPart .. "|r" .. xpPart)
     else
         self.lastKilledText:SetText("|cff99ccffKill a mob to start|r")
     end
@@ -809,10 +868,11 @@ function HowManyMobs:UpdateMobCount()
 
         if averageXP > 0 then
             local mobsNeeded = math.ceil(xpNeeded / averageXP)
+            local xpPct = math.floor(currentXP / maxXP * 100)
             
             -- Calculate variance to show confidence range
             local variance = self:GetXPVariance()
-            local displayText = "|cffff9900" .. mobsNeeded .. "|r mobs to level up"
+            local displayText = "|cffff9900" .. mobsNeeded .. "|r mobs to level up |cff888888(" .. xpPct .. "%)|r"
             
             if variance > 0 and self.sessionKills >= 3 then
                 -- Show ±variance range for confidence
@@ -839,7 +899,6 @@ function HowManyMobs:UpdateMobCount()
     self:UpdateEstimatedTimeText()
     self:UpdateUILayout()
 
-    local xpHour, killsHour = self:GetSessionStats()
     -- Session stats with improved calculation
     if self.sessionStatsText then
         if not self.firstKillTime or self.sessionKills == 0 then
@@ -857,7 +916,14 @@ function HowManyMobs:UpdateMobCount()
     end
 end
 
+-- ============================================
 -- XP CALCULATION (Classic Era accurate)
+-- ============================================
+
+-- GetZD: returns the "Zone Difference" gray-mob threshold for a given player level.
+-- A mob that is ZD or more levels BELOW the player gives 0 XP.
+-- Values match the original WoW 1.x server formula.
+-- Example: level 30 → ZD=11, so mobs level ≤19 yield no XP.
 function HowManyMobs:GetZD(playerLevel)
     if playerLevel <= 7 then return 5 end
     if playerLevel <= 9 then return 6 end
@@ -873,14 +939,19 @@ function HowManyMobs:GetZD(playerLevel)
     return 17
 end
 
+-- Classic Era XP formula:
+--   baseXP = 5 * playerLevel + 45  (XP for a perfectly same-level kill)
+--   mob below player: scales linearly down to 0 at the ZD cutoff
+--   mob above player: +5% per level above, capped at +4 levels (+20% max)
 function HowManyMobs:EstimateMobXP(mobLevel, playerLevel)
     if not mobLevel or mobLevel < 1 then mobLevel = playerLevel end
     local baseXP = 5 * playerLevel + 45
     local levelDiff = playerLevel - mobLevel
-    if levelDiff >= 5 then
+    local zd = self:GetZD(playerLevel)
+    -- Gray mobs give 0 XP when levelDiff >= ZD (not hardcoded to 5)
+    if levelDiff >= zd then
         return 0
     elseif levelDiff >= 0 then
-        local zd = self:GetZD(playerLevel)
         local factor = 1 - (levelDiff / zd)
         if factor <= 0 then return 0 end
         return math.floor(baseXP * factor + 0.5)
@@ -915,58 +986,68 @@ function HowManyMobs:GetKillEfficiency(mobLevel, playerLevel)
 end
 
 function HowManyMobs:UpdateEfficiencyText()
-    -- Display ROLLING EFFICIENCY (3-mob average) instead of single mob
-    -- This provides much more stable feedback and better reflects actual grinding trend
+    -- Display efficiency using real XP data when available, falling back to estimates
     if not self.efficiencyText or not HowManyMobsDB.showEfficiency then return end
     
     if HowManyMobsDB.lastMobs and #HowManyMobsDB.lastMobs > 0 then
-        -- Use rolling average of last 3 mobs for more stable display
         local avgEfficiency = self:GetRollingEfficiency()
         
-        if avgEfficiency > 0 or #HowManyMobsDB.lastMobs > 0 then
-            -- Determine color based on rolling average
-            local colorCode = "|cff999999"
-            if avgEfficiency >= 80 then
-                colorCode = "|cff00ff00"
-            elseif avgEfficiency >= 50 then
-                colorCode = "|cffffff00"
-            elseif avgEfficiency > 0 then
-                colorCode = "|cffff9900"
-            else
-                colorCode = "|cffff0000"
-            end
-            
-            local efficiencyDisplay = ""
-            if avgEfficiency == 0 then
-                efficiencyDisplay = colorCode .. "0% (Gray)|r"
-            else
-                efficiencyDisplay = colorCode .. avgEfficiency .. "%|r avg (3-mob rolling)"
-            end
-            
-            self.efficiencyText:SetText("|cffffd700Efficiency:|r " .. efficiencyDisplay)
+        local colorCode
+        if avgEfficiency >= 80 then
+            colorCode = "|cff00ff00"
+        elseif avgEfficiency >= 50 then
+            colorCode = "|cffffff00"
+        elseif avgEfficiency > 0 then
+            colorCode = "|cffff9900"
         else
-            self.efficiencyText:SetText("|cffffd700Efficiency:|r |cff99ccffNo data|r")
+            colorCode = "|cffff0000"
         end
+        
+        local efficiencyDisplay = ""
+        if avgEfficiency == 0 then
+            efficiencyDisplay = colorCode .. "0% (Gray)|r"
+        else
+            efficiencyDisplay = colorCode .. avgEfficiency .. "%|r avg (3-mob rolling)"
+        end
+        
+        self.efficiencyText:SetText("|cffffd700Efficiency:|r " .. efficiencyDisplay)
     else
         self.efficiencyText:SetText("|cffffd700Efficiency:|r |cff99ccffKill a mob|r")
     end
 end
 
 function HowManyMobs:GetRollingEfficiency()
-    -- ROLLING 3-MOB EFFICIENCY AVERAGE (improvement #2)
-    -- Calculates average efficiency of last 3 kills instead of just latest
-    -- Much more stable display - eliminates wild swings from mob type changes
-    -- Still color-coded but now represents true grinding efficiency trend
-    -- Example: Last 3 mobs = 95%, 88%, 85% = shows 89% avg instead of just the latest
+    -- Uses real XP from session kills when available for accurate efficiency
+    -- Falls back to level-based estimates otherwise
     local playerLevel = UnitLevel("player")
+    local baseXP = self:EstimateMobXP(playerLevel, playerLevel)
+    if baseXP <= 0 then return 0 end
     local efficiencies = {}
     
-    -- Check last 3 kills
+    -- Check last 3 kills - prefer real XP from session data
     for i = 1, math.min(3, #HowManyMobsDB.lastMobs) do
         local mob = HowManyMobsDB.lastMobs[i]
         if mob and mob.level and mob.level >= 1 then
-            local _, eff = self:GetKillEfficiency(mob.level, playerLevel)
-            table.insert(efficiencies, eff)
+            -- Try to find real XP from session tracking first
+            local realXP = nil
+            if self.sessionMobKills then
+                for _, kill in ipairs(self.sessionMobKills) do
+                    if kill.name == mob.name and kill.xpGained and kill.xpGained > 0 then
+                        -- Use base (non-rested) XP for accurate efficiency
+                        realXP = kill.baseXP or kill.xpGained
+                        break
+                    end
+                end
+            end
+            
+            if realXP then
+                -- Real XP efficiency is more accurate than estimates
+                local eff = math.floor((realXP / baseXP) * 100 + 0.5)
+                table.insert(efficiencies, math.min(eff, 120))  -- Cap at 120% (higher-level mobs)
+            else
+                local _, eff = self:GetKillEfficiency(mob.level, playerLevel)
+                table.insert(efficiencies, eff)
+            end
         end
     end
     
@@ -991,7 +1072,8 @@ function HowManyMobs:GetXPVariance()
     local xpValues = {}
     for _, kill in ipairs(self.sessionMobKills) do
         if kill.xpGained and kill.xpGained > 0 then
-            table.insert(xpValues, kill.xpGained)
+            -- Use base (non-rested) XP for consistent variance
+            table.insert(xpValues, kill.baseXP or kill.xpGained)
         end
     end
     
@@ -1015,13 +1097,45 @@ function HowManyMobs:GetXPVariance()
     return stdDev
 end
 
+-- Track mobs the player/party has damaged (to filter out other players' kills)
+HowManyMobs.damagedMobs = {}
+HowManyMobs.lastDamagedMobsPrune = 0
+
 -- ============================================
 -- EVENTS
 -- ============================================
 function HowManyMobs:OnCombatLogEvent()
     if not HowManyMobsDB or not HowManyMobsDB.trackingEnabled then return end
-    local _, eventType, _, _, _, _, _, _, destName, destFlags = CombatLogGetCurrentEventInfo()
+    local _, eventType, _, _, sourceName, sourceFlags, _, destGUID, destName, destFlags = CombatLogGetCurrentEventInfo()
+    
+    -- Track mobs we (or our group) have damaged
+    if destName and destGUID and (
+        eventType == "SWING_DAMAGE" or eventType == "SPELL_DAMAGE" or 
+        eventType == "RANGE_DAMAGE" or eventType == "SPELL_PERIODIC_DAMAGE"
+    ) then
+        local isPlayerSource = bit.band(sourceFlags, COMBATLOG_OBJECT_AFFILIATION_MINE) ~= 0
+                            or bit.band(sourceFlags, COMBATLOG_OBJECT_AFFILIATION_PARTY) ~= 0
+                            or bit.band(sourceFlags, COMBATLOG_OBJECT_AFFILIATION_RAID) ~= 0
+        if isPlayerSource then
+            local now = GetTime()
+            self.damagedMobs[destGUID] = { name = destName, time = now }
+            -- Prune old entries at most once every 60 seconds
+            if now - self.lastDamagedMobsPrune > 60 then
+                self.lastDamagedMobsPrune = now
+                for guid, data in pairs(self.damagedMobs) do
+                    if now - data.time > 300 then
+                        self.damagedMobs[guid] = nil
+                    end
+                end
+            end
+        end
+    end
+    
     if eventType ~= "UNIT_DIED" or not destName then return end
+
+    -- Only count mobs we've actually damaged (filters out other players' kills)
+    if destGUID and not self.damagedMobs[destGUID] then return end
+    if destGUID then self.damagedMobs[destGUID] = nil end
 
     local isPlayer = bit.band(destFlags, COMBATLOG_OBJECT_TYPE_PLAYER) ~= 0
     local isAlly = bit.band(destFlags, COMBATLOG_OBJECT_AFFILIATION_MINE) ~= 0 
@@ -1035,10 +1149,11 @@ function HowManyMobs:OnCombatLogEvent()
         if currentTargetName == destName then
             mobLevel = UnitLevel("target")
             if mobLevel and mobLevel > 0 then
-                -- Cache this valid mob level
-                self.targetCache.name = destName
-                self.targetCache.level = mobLevel
-                self.targetCache.lastUpdated = GetTime()
+                -- Cache this valid mob level using multi-entry cache
+                self.targetCache[destName] = {
+                    level = mobLevel,
+                    lastUpdated = GetTime()
+                }
             end
         end
     end
@@ -1071,6 +1186,11 @@ function HowManyMobs:OnXPUpdate()
 
             if dt >= 0 and dt < 45 then
                 if not kill.xpAssigned then
+                    -- Sanity check: reject XP gains that are too large to be a mob kill
+                    -- (e.g. quest turn-ins). Max mob XP at +4 levels is ~1.2x base XP;
+                    -- with rested that doubles to ~2.4x. Use 3x as a safe ceiling.
+                    local maxMobXP = (5 * UnitLevel("player") + 45) * 3
+                    if gained > maxMobXP then break end
                     kill.xpGained = gained
                     kill.xpAssigned = true
                     matched = true
@@ -1080,10 +1200,37 @@ function HowManyMobs:OnXPUpdate()
         end
     end
 
-    -- Always record XP for rolling average even if no match
-    table.insert(HowManyMobsDB.recentRealXPGains, 1, gained)
-    if #HowManyMobsDB.recentRealXPGains > 12 then
-        table.remove(HowManyMobsDB.recentRealXPGains, 13)
+    -- Only record XP for rolling average if it was matched to a kill
+    -- This prevents quest turn-ins, exploration, and discovery XP from
+    -- polluting the mob kill average and skewing "mobs to level" count
+    if matched then
+        self.sessionTotalXP = (self.sessionTotalXP or 0) + gained
+        
+        -- Detect rested XP using the API: if player has rested bonus, the kill XP
+        -- includes a rested portion. Store the base (non-rested) XP for predictions
+        -- so "mobs to level" stays accurate when rested runs out.
+        local exhaustion = GetXPExhaustion()
+        local isRested = exhaustion and exhaustion > 0
+        local baseGained = isRested and math.floor(gained / 2 + 0.5) or gained
+        
+        if isRested then
+            -- Player is rested: the gained XP is roughly 2x base for kill XP
+            -- Find the kill we just assigned this XP to and store baseXP
+            for _, kill in ipairs(self.sessionMobKills) do
+                if kill.xpAssigned and kill.xpGained == gained and not kill.baseXP then
+                    kill.rested = true
+                    kill.baseXP = baseGained
+                    break
+                end
+            end
+        end
+        
+        -- Store base (non-rested) XP in rolling average so predictions
+        -- stay accurate when rested runs out
+        table.insert(HowManyMobsDB.recentRealXPGains, 1, baseGained)
+        if #HowManyMobsDB.recentRealXPGains > 12 then
+            table.remove(HowManyMobsDB.recentRealXPGains, 13)
+        end
     end
 
     self.lastXP = currentXP
@@ -1103,7 +1250,11 @@ function HowManyMobs:OnPlayerLogin()
     -- Reset session tracking for fresh session on login
     self.firstKillTime = nil
     self.sessionKills = 0
+    self.sessionTotalXP = 0
     self.sessionMobKills = {}
+
+    -- Sync lastXP to current value to prevent bogus gain on first XP event
+    self.lastXP = UnitXP("player")
 
     if HowManyMobsDB.lastMobName and (not HowManyMobsDB.lastMobs or #HowManyMobsDB.lastMobs == 0) then
         HowManyMobsDB.lastMobs = {{name = HowManyMobsDB.lastMobName, level = HowManyMobsDB.lastMobLevel or UnitLevel("player"), time = GetTime()}}
@@ -1112,7 +1263,10 @@ function HowManyMobs:OnPlayerLogin()
     end
 
     self:CreateUI()
-    self:RegisterSettingsPanel()
+    if not self.settingsRegistered then
+        self:RegisterSettingsPanel()
+        self.settingsRegistered = true
+    end
 
     self:UpdateMobCount()
 end
@@ -1168,6 +1322,11 @@ SlashCmdList["HOWMANYMOBS"] = function(msg)
     elseif cmd == "reset" then
         HowManyMobsDB.lastMobs = {}
         HowManyMobsDB.recentRealXPGains = {}
+        HowManyMobs.sessionMobKills = {}
+        HowManyMobs.sessionKills = 0
+        HowManyMobs.sessionTotalXP = 0
+        HowManyMobs.firstKillTime = nil
+        HowManyMobs.damagedMobs = {}
         print("|cff00ff00HowManyMobs:|r All data reset.")
         if HowManyMobs.mobsNeededText then HowManyMobs:UpdateMobCount() end
     elseif cmd == "toggle" then
@@ -1259,7 +1418,7 @@ function HowManyMobs:CreateSettingsPanel()
     lockCheck.text = lockCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     lockCheck.text:SetPoint("LEFT", lockCheck, "RIGHT", 4, 0)
     lockCheck.text:SetText("Lock Frame Position")
-    lockCheck:SetChecked(HowManyMobsDB.uiLocked or false)
+    lockCheck:SetChecked(HowManyMobsDB.uiLocked)
     lockCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.uiLocked = self:GetChecked()
     end)
@@ -1270,7 +1429,7 @@ function HowManyMobs:CreateSettingsPanel()
     showLastCheck.text = showLastCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     showLastCheck.text:SetPoint("LEFT", showLastCheck, "RIGHT", 4, 0)
     showLastCheck.text:SetText("Show \"Last killed\" line")
-    showLastCheck:SetChecked(HowManyMobsDB.showLastKilled or true)
+    showLastCheck:SetChecked(HowManyMobsDB.showLastKilled)
     showLastCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.showLastKilled = self:GetChecked()
         HowManyMobs:UpdateLastKilledText()
@@ -1283,7 +1442,7 @@ function HowManyMobs:CreateSettingsPanel()
     showLevelCheck.text = showLevelCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     showLevelCheck.text:SetPoint("LEFT", showLevelCheck, "RIGHT", 4, 0)
     showLevelCheck.text:SetText("Show mob level in \"Last killed\" line")
-    showLevelCheck:SetChecked(HowManyMobsDB.showMobLevel or true)
+    showLevelCheck:SetChecked(HowManyMobsDB.showMobLevel)
     showLevelCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.showMobLevel = self:GetChecked()
         HowManyMobs:UpdateLastKilledText()
@@ -1295,7 +1454,7 @@ function HowManyMobs:CreateSettingsPanel()
     showAvgXPCheck.text = showAvgXPCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     showAvgXPCheck.text:SetPoint("LEFT", showAvgXPCheck, "RIGHT", 4, 0)
     showAvgXPCheck.text:SetText("Show Average XP per Kill")
-    showAvgXPCheck:SetChecked(HowManyMobsDB.showAverageXP or false)
+    showAvgXPCheck:SetChecked(HowManyMobsDB.showAverageXP)
     showAvgXPCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.showAverageXP = self:GetChecked()
         HowManyMobs:UpdateAverageXPText()
@@ -1308,7 +1467,7 @@ function HowManyMobs:CreateSettingsPanel()
     showEfficiencyCheck.text = showEfficiencyCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     showEfficiencyCheck.text:SetPoint("LEFT", showEfficiencyCheck, "RIGHT", 4, 0)
     showEfficiencyCheck.text:SetText("Show Kill Efficiency Rating")
-    showEfficiencyCheck:SetChecked(HowManyMobsDB.showEfficiency or true)
+    showEfficiencyCheck:SetChecked(HowManyMobsDB.showEfficiency)
     showEfficiencyCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.showEfficiency = self:GetChecked()
         HowManyMobs:UpdateEfficiencyText()
@@ -1321,7 +1480,7 @@ function HowManyMobs:CreateSettingsPanel()
     showTimeCheck.text = showTimeCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     showTimeCheck.text:SetPoint("LEFT", showTimeCheck, "RIGHT", 4, 0)
     showTimeCheck.text:SetText("Show Estimated Time to Level")
-    showTimeCheck:SetChecked(HowManyMobsDB.showEstimatedTime or false)
+    showTimeCheck:SetChecked(HowManyMobsDB.showEstimatedTime)
     showTimeCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.showEstimatedTime = self:GetChecked()
         HowManyMobs:UpdateEstimatedTimeText()
@@ -1334,7 +1493,7 @@ function HowManyMobs:CreateSettingsPanel()
     showSessionCheck.text = showSessionCheck:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     showSessionCheck.text:SetPoint("LEFT", showSessionCheck, "RIGHT", 4, 0)
     showSessionCheck.text:SetText("Show Session Stats")
-    showSessionCheck:SetChecked(HowManyMobsDB.showSessionStats or true)
+    showSessionCheck:SetChecked(HowManyMobsDB.showSessionStats)
     showSessionCheck:SetScript("OnClick", function(self)
         HowManyMobsDB.showSessionStats = self:GetChecked()
         if HowManyMobs.sessionStatsText then
@@ -1364,6 +1523,11 @@ function HowManyMobs:CreateSettingsPanel()
         HowManyMobsDB.showEfficiency = true
         HowManyMobsDB.showEstimatedTime = false
         HowManyMobsDB.showSessionStats = true
+        HowManyMobs.sessionMobKills = {}
+        HowManyMobs.sessionKills = 0
+        HowManyMobs.sessionTotalXP = 0
+        HowManyMobs.firstKillTime = nil
+        HowManyMobs.damagedMobs = {}
         scaleSlider:SetValue(1.0)
         opacitySlider:SetValue(0.85)
         lockCheck:SetChecked(false)
@@ -1432,6 +1596,9 @@ function HowManyMobs:GetAverageKillTime()
 
     local times = {}
 
+    -- sessionMobKills[1] is the newest kill, [N] is the oldest (prepended in AddMobToHistory).
+    -- For each adjacent pair: t1 = newer kill, t2 = older kill → t1 > t2 is always expected.
+    -- dt = t1 - t2 gives the time between two consecutive kills (inter-kill interval).
     for i = 1, #self.sessionMobKills - 1 do
         local t1 = self.sessionMobKills[i].time
         local t2 = self.sessionMobKills[i + 1].time
@@ -1440,7 +1607,7 @@ function HowManyMobs:GetAverageKillTime()
             local dt = t1 - t2
 
             -- Ignore weird gaps (AFK, long breaks)
-            if dt > 0 and dt < 30 then
+            if dt > 0 and dt < 120 then
                 table.insert(times, dt)
             end
         end

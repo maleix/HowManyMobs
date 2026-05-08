@@ -5,7 +5,6 @@
 ## Notes: Tracks how many mobs like the last one you killed you need to kill to level up
 ## Category: Leveling
 ## SavedVariables: HowManyMobsDB
-## SavedVariablesPerCharacter: HowManyMobsCharDB
 ## X-Category: Leveling
 
 HowManyMobs.lua

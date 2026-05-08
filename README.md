@@ -2,13 +2,14 @@
 
 A World of Warcraft: Classic Era addon designed for **grinding** - tracks how many mobs you need to kill to level up.
 
-## What's New (v2.2+)
+## v1.0 — Feature Highlights
 
-- ✨ **3-mob rolling efficiency average** - stable, consistent efficiency ratings (no more wild swings)
-- 📊 **Confidence ranges on mob counter** - see ±variance (e.g., "10 ± 2 mobs") once you have 3+ kills
-- 🎯 **Weighted XP averaging** - recent kills matter more, reflects your improving performance at a grind spot
-- 🎪 **Median-based kill time** - outlier filtering removes one-shots and AFK delays for accurate time estimates
-- 📈 **Data preservation across levels** - preserves last 10 kills from previous level (foundation for level-by-level analysis)
+- ✨ **3-mob rolling efficiency average** — stable, consistent efficiency ratings (no more wild swings)
+- 📊 **Confidence ranges on mob counter** — see ±variance (e.g., "10 ± 2 mobs") once you have 3+ kills
+- 🎯 **Weighted XP averaging** — recent kills matter more, reflects your improving performance at a grind spot
+- 🎪 **Median-based kill time** — outlier filtering removes one-shots and AFK delays for accurate time estimates
+- 🛡️ **Player-only kill credit** — only counts mobs you (or your group) actually damaged, not nearby players' kills
+- 💤 **Rested XP aware** — stores base XP separately so predictions stay accurate when your rested bonus expires
 
 ## What is Grinding?
 
@@ -59,8 +60,8 @@ This addon is specifically built to optimize your grinding sessions by showing y
 ## Usage
 
 ### Minimap Button
-- Click the minimap button to toggle the main information display
-- Right-click to close the window
+- Left-click the minimap button to toggle the main information display
+- Right-click to open the options menu (toggle display lines, lock frame, reset data)
 - Drag the button to reposition it on your minimap
 
 ### Main Window
@@ -129,14 +130,14 @@ The ±range gets tighter as you kill more mobs (variance decreases = more confid
 
 ### Weighted XP Averaging
 The addon doesn't use simple averages. Instead, **recent kills get higher weight** than older kills:
-- Your latest kill: 3.0x weight
-- Decreases gradually: 2.5x, 2.0x, 1.5x, 1.0x, 0.5x
-- This reflects that you **improve at a grind spot** as you continue (better gear, understanding mob patterns)
+- Weights run linearly from N (newest kill) down to 1 (oldest kill), where N = number of kills with real XP data (up to 10)
+- With 3 kills tracked: newest = 3×, middle = 2×, oldest = 1×
+- This reflects that you **improve at a grind spot** as you continue (better positioning, understanding mob patterns)
 - Makes predictions more accurate over time
 
-**Example**: If your first 3 kills gave 80, 85, 90 XP:
+**Example**: If your last 3 kills gave 80, 85, 90 XP (90 being most recent):
 - Simple average: 85 XP
-- Weighted average: ~87 XP (recent 90 is weighted higher)
+- Weighted average: (90×3 + 85×2 + 80×1) / 6 = **87 XP**
 - More likely accurate since you're getting faster at this spot
 
 ### Kill Time Averaging
