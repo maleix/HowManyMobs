@@ -475,6 +475,12 @@ function HowManyMobs:CreateUI()
     self.mobsNeededText:SetWidth(231)
     self.mobsNeededText:SetJustifyH("LEFT")
 
+    -- Separator line
+    local separator = UIFrame:CreateTexture(nil, "OVERLAY")
+    separator:SetSize(231, 1)
+    separator:SetPoint("TOPLEFT", UIFrame, "TOPLEFT", 12, -30)
+    separator:SetColorTexture(0.5, 0.5, 0.5, 0.3)
+
     self.lastKilledText = UIFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     self.lastKilledText:SetPoint("TOPLEFT", UIFrame, "TOPLEFT", 12, -31)
     self.lastKilledText:SetWidth(231)
@@ -547,7 +553,7 @@ function HowManyMobs:UpdateUILayout()
 
     self.mobsNeededText:SetPoint("TOPLEFT", self.UIFrame, "TOPLEFT", 12, y)
     self.mobsNeededText:Show()
-    y = y - lineHeight
+    y = y - lineHeight - 8
 
     if HowManyMobsDB.showLastKilled then
         self.lastKilledText:SetPoint("TOPLEFT", self.UIFrame, "TOPLEFT", 12, y)
@@ -787,17 +793,7 @@ function HowManyMobs:UpdateLastKilledText()
     if HowManyMobsDB.lastMobs and #HowManyMobsDB.lastMobs > 0 then
         local latest = HowManyMobsDB.lastMobs[1]
         local levelPart = HowManyMobsDB.showMobLevel and latest.level and " (Lvl " .. latest.level .. ")" or ""
-        -- Show real XP gained if available from session tracking
-        local xpPart = ""
-        if self.sessionMobKills then
-            for _, kill in ipairs(self.sessionMobKills) do
-                if kill.name == latest.name and kill.xpGained and kill.xpGained > 0 then
-                    xpPart = " |cff00ccff" .. kill.xpGained .. " XP|r"
-                    break
-                end
-            end
-        end
-        self.lastKilledText:SetText("|cffffd700Last killed:|r |cff1eff00" .. latest.name .. levelPart .. "|r" .. xpPart)
+        self.lastKilledText:SetText("|cffffd700Last killed:|r |cff1eff00" .. latest.name .. levelPart .. "|r")
     else
         self.lastKilledText:SetText("|cff99ccffKill a mob to start|r")
     end
@@ -823,7 +819,7 @@ function HowManyMobs:UpdateAverageXPText()
     end
 
     if avg > 0 then
-        self.averageXPText:SetText("|cffffd700Avg:|r |cff00ff00" .. avg .. " XP/kill|r |cff888888(" .. source .. ")")
+        self.averageXPText:SetText("|cffffd700Avg:|r |cff00ff00" .. avg .. " XP/kill|r")
     else
         self.averageXPText:SetText("|cffffd700Avg:|r |cff99ccffNo data yet|r")
     end
@@ -870,7 +866,7 @@ function HowManyMobs:UpdateMobCount()
             local mobsNeeded = math.ceil(xpNeeded / averageXP)
             local xpPct = math.floor(currentXP / maxXP * 100)
             
-            -- Calculate variance to show confidence range
+            -- Calculate variance to show confidence range (code preserved for future use)
             local variance = self:GetXPVariance()
             local displayText = "|cffff9900" .. mobsNeeded .. "|r mobs to level up |cff888888(" .. xpPct .. "%)|r"
             
@@ -882,7 +878,7 @@ function HowManyMobs:UpdateMobCount()
                     local mobsLow = math.ceil(xpNeeded / highXP)   -- High XP = fewer mobs
                     local mobsHigh = math.ceil(xpNeeded / lowXP)   -- Low XP = more mobs
                     if mobsLow ~= mobsNeeded or mobsHigh ~= mobsNeeded then
-                        displayText = displayText .. " |cff888888(±" .. math.ceil(mobsHigh - mobsNeeded) .. ")|r"
+                        -- displayText = displayText .. " |cff888888(±" .. math.ceil(mobsHigh - mobsNeeded) .. ")|r"
                     end
                 end
             end
@@ -907,7 +903,7 @@ function HowManyMobs:UpdateMobCount()
             local xpHour, killsHour = self:GetSessionStats()
             if xpHour > 0 or killsHour > 0 then
                 self.sessionStatsText:SetText(
-                    string.format("|cffffd700Session:|r |cff00ff00%.0f XP/hr|r |cff00ccff%.1f kills/hr|r", xpHour, killsHour)
+                    string.format("|cffffd700Session:|r |cff00ff00%.0f XP/hr|r |cff00ccff%.0f kills/hr|r", xpHour, killsHour)
                 )
             else
                 self.sessionStatsText:SetText("|cffffd700Session:|r |cff99ccffGathering data...|r")
@@ -1007,7 +1003,7 @@ function HowManyMobs:UpdateEfficiencyText()
         if avgEfficiency == 0 then
             efficiencyDisplay = colorCode .. "0% (Gray)|r"
         else
-            efficiencyDisplay = colorCode .. avgEfficiency .. "%|r avg (3-mob rolling)"
+            efficiencyDisplay = colorCode .. avgEfficiency .. "%|r"
         end
         
         self.efficiencyText:SetText("|cffffd700Efficiency:|r " .. efficiencyDisplay)
