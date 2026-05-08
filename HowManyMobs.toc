@@ -1,4 +1,4 @@
-## Interface: 11403
+## Interface: 11507
 ## Title: How Many Mobs
 ## Author: maleix
 ## Version: 1.0

@@ -1359,7 +1359,7 @@ end
 
 -- Full settings panel
 function HowManyMobs:CreateSettingsPanel()
-    local panel = CreateFrame("Frame", "HowManyMobsSettingsPanel")
+    local panel = CreateFrame("Frame", "HowManyMobsSettingsPanel", UIParent)
     panel.name = "How Many Mobs (Grinding Tracker)"
 
     local function AddTooltip(element, text)
@@ -1552,22 +1552,22 @@ function HowManyMobs:CreateSettingsPanel()
     efficiencyInfo:SetPoint("TOPLEFT", 16, -490)
     efficiencyInfo:SetText("Efficiency Calculation:")
     
-    local efficiencyFormula = panel:CreateFontString(nil, "OVERLAY", "GameFontSmall")
+    local efficiencyFormula = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     efficiencyFormula:SetPoint("TOPLEFT", 16, -515)
     efficiencyFormula:SetText("(XP from current mob / XP from same-level mob) × 100%")
     efficiencyFormula:SetTextColor(0.7, 0.7, 1)
 
-    local efficiencyExample = panel:CreateFontString(nil, "OVERLAY", "GameFontSmall")
+    local efficiencyExample = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     efficiencyExample:SetPoint("TOPLEFT", 16, -535)
     efficiencyExample:SetText("Example: Level 20 grinding Level 20 mobs = 100% efficient")
     efficiencyExample:SetTextColor(0.7, 0.7, 1)
 
-    local efficiencyTip = panel:CreateFontString(nil, "OVERLAY", "GameFontSmall")
+    local efficiencyTip = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     efficiencyTip:SetPoint("TOPLEFT", 16, -555)
     efficiencyTip:SetText("Green (80%+) = Optimal grind spot | Yellow (50-79%) = Good")
     efficiencyTip:SetTextColor(0.7, 0.7, 1)
 
-    local efficiencyTip2 = panel:CreateFontString(nil, "OVERLAY", "GameFontSmall")
+    local efficiencyTip2 = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     efficiencyTip2:SetPoint("TOPLEFT", 16, -570)
     efficiencyTip2:SetText("Orange (1-49%) = Low XP | Red (0%) = Gray mobs (no XP)")
     efficiencyTip2:SetTextColor(0.7, 0.7, 1)
@@ -1577,12 +1577,11 @@ end
 
 function HowManyMobs:RegisterSettingsPanel()
     local panel = self:CreateSettingsPanel()
-    if Settings and Settings.RegisterCanvasLayoutCategory then
-        local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
-        Settings.RegisterAddOnCategory(category)
-    elseif InterfaceOptions_AddCategory then
-        InterfaceOptions_AddCategory(panel)
-    end
+
+    panel.name = "How Many Mobs"
+
+    local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
+    Settings.RegisterAddOnCategory(category)
 end
 
 function HowManyMobs:GetAverageKillTime()
